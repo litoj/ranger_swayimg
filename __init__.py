@@ -1,8 +1,9 @@
 # Display image previews in ranger using swayimg (Wayland image viewer).
 #
 # Instead of restarting swayimg for every preview, a single instance is kept
-# alive and controlled via a command file + SIGUSR1.  The companion swayimg
-# Lua plugin (using sai.swi) lives next to this file in ranger_preview.lua.
+# alive and controlled via sai.lib.ipc over a Unix domain socket.  The
+# companion swayimg Lua plugin (using sai.swi) lives next to this file in
+# ranger_preview.lua.
 #
 # The preview window stays visible even when ranger loses focus.  It only hides
 # when the cursor moves to a non-image file.  All window management is handled
@@ -13,13 +14,14 @@
 #   - Sway or Hyprland compositor
 #
 # For Sway, no configuration is needed.
-# For Hyprland, add ``windowrulev2 = no_focus,class:^ranger-swayimg$``
+# For Hyprland, add ``windowrulev2 = no_focus,class:^ranger-swayimg-\d+$``
 # to ``hyprland.conf`` so the preview window never steals focus.
 
 from __future__ import absolute_import, division, print_function
 
 import os
-import signal
+import socket
+import struct
 import subprocess
 import threading
 import time
@@ -33,17 +35,19 @@ from .backends import detect_backend
 class SwayimgImageDisplayer(ImageDisplayer):
     """Image preview using a persistent swayimg instance."""
 
-    APP_ID = "ranger-swayimg"
+    APP_ID_PREFIX = "ranger-swayimg"
 
     def __init__(self):
+        self.app_id = "{}-{}".format(self.APP_ID_PREFIX, os.getpid())
         self.process = None
-        self.cmd_file = None
+        self.socket_path = None
         self.last_geometry = None
         self.last_path = None
         self._hidden = True
         self._hide_timer = None
         self._last_workspace = None
         self._last_image_time = 0.0
+        self._ipc_ready = False
         self._backend = detect_backend()
 
     def _running(self):
@@ -85,16 +89,13 @@ class SwayimgImageDisplayer(ImageDisplayer):
     def _start(self, path, geometry):
         """Launch swayimg and the companion Lua plugin."""
         working_dir = self.working_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        self.cmd_file = os.path.join(
+        self.socket_path = os.path.join(
             working_dir,
-            "ranger-swayimg-{}.cmd".format(os.getpid())
+            "ranger-swayimg-{}.sock".format(os.getpid())
         )
-        self._write_cmd_file(
-            "show", path,
-            (geometry[2], geometry[3]) if geometry else None)
 
         lua_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ranger_preview.lua")
-        cmd = ["swayimg", "--appid", self.APP_ID, "--config", lua_script]
+        cmd = ["swayimg", "--appid", self.app_id, "--config", lua_script]
         if geometry is not None:
             x, y, w, h = geometry
             cmd.extend(["--position", "{},{}".format(x, y)])
@@ -102,11 +103,11 @@ class SwayimgImageDisplayer(ImageDisplayer):
         cmd.append(path)
 
         env = os.environ.copy()
-        env["RANGER_SWAYIMG_CMD"] = self.cmd_file
+        env["RANGER_SWAYIMG_SOCKET"] = self.socket_path
 
         # Ensure swayimg never steals focus (blocking — must complete before launch).
         if self._backend is not None:
-            self._backend.apply_no_focus(self.APP_ID)
+            self._backend.apply_no_focus(self.app_id)
 
         # pylint: disable=consider-using-with
         try:
@@ -122,30 +123,34 @@ class SwayimgImageDisplayer(ImageDisplayer):
         self.last_geometry = geometry
         self._last_workspace = None
         self._last_image_time = 0.0
+        self._ipc_ready = False
 
-    def _write_cmd_file(self, action, arg="", window_size=None):
-        """Atomically write the command file so Lua never reads a partial file."""
-        if self.cmd_file is None:
-            return False
-        tmp = self.cmd_file + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(action + "\n")
-            if arg:
-                f.write(arg + "\n")
-            if window_size is not None:
-                w, h = window_size
-                f.write("{},{}\n".format(w, h))
-        os.rename(tmp, self.cmd_file)
-        return True
-
-    def _send(self, action, arg="", window_size=None):
-        """Write a command to the command file and notify swayimg."""
-        if not self._running() or self.cmd_file is None:
-            return False
-        self._write_cmd_file(action, arg, window_size)
-        if self.process is not None:
-            self.process.send_signal(signal.SIGUSR1)
-        return True
+    def _send(self, code):
+        """Send Lua code to swayimg via the IPC socket."""
+        if not self._running() or self.socket_path is None:
+            return
+        if not self._ipc_ready:
+            deadline = time.monotonic() + 5.0
+            while not os.path.exists(self.socket_path):
+                if time.monotonic() > deadline:
+                    return
+                time.sleep(0.05)
+            self._ipc_ready = True
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        sock.connect(self.socket_path)
+        with sock, sock.makefile("rb") as f:
+            code_bytes = code.encode()
+            sock.sendall(struct.pack("<I", len(code_bytes)) + code_bytes)
+            # Read and discard the response. This ensures the server has
+            # finished executing the code before we close the socket;
+            # closing too early can RST the connection and truncate the
+            # request.
+            header = f.read(5)
+            if len(header) == 5:
+                resp_len = struct.unpack("<I", header[1:5])[0]
+                if resp_len > 0:
+                    f.read(resp_len)
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
@@ -168,16 +173,21 @@ class SwayimgImageDisplayer(ImageDisplayer):
         if self._backend is not None and geometry is not None:
             if self._hidden:
                 self._backend.show_window(
-                    self.APP_ID, geometry[0], geometry[1], workspace)
+                    self.app_id, geometry[0], geometry[1], workspace)
                 self._backend.restore_focus(focus_id)
                 self._hidden = False
                 self._last_workspace = workspace
             elif geometry != self.last_geometry:
-                self._backend.move_window(self.APP_ID, geometry[0], geometry[1])
+                self._backend.move_window(self.app_id, geometry[0], geometry[1])
 
         # Reload the image in swayimg if something changed.
         if self._hidden or path != self.last_path or geometry != self.last_geometry:
-            self._send("show", path, win_size)
+            if win_size is not None:
+                code = 'preview({!r}, {}, {})'.format(
+                    path, win_size[0], win_size[1])
+            else:
+                code = 'preview({!r})'.format(path)
+            self._send(code)
             self._last_image_time = time.monotonic()
 
         # After image update, correct workspace if ranger moved.
@@ -186,7 +196,7 @@ class SwayimgImageDisplayer(ImageDisplayer):
         if (self._backend is not None and workspace is not None
                 and workspace != self._last_workspace
                 and time.monotonic() - self._last_image_time > 1.0):
-            self._backend.move_to_workspace(self.APP_ID, workspace)
+            self._backend.move_to_workspace(self.app_id, workspace)
             self._last_workspace = workspace
 
         self.last_geometry = geometry
@@ -209,22 +219,23 @@ class SwayimgImageDisplayer(ImageDisplayer):
         # the timer, so if this fires after a draw() we correctly skip.
         if self._hidden and self._running():
             if self._backend is not None:
-                self._backend.hide_window(self.APP_ID)
+                self._backend.hide_window(self.app_id)
 
     def quit(self):
         if self._hide_timer is not None:
             self._hide_timer.cancel()
             self._hide_timer = None
         if self._running() and self.process is not None:
-            self._send("exit")
+            self._send("sai.exit()")
             try:
                 self.process.wait(timeout=2)
             except Exception:
                 self.process.terminate()
             self.process = None
-        if self.cmd_file is not None and os.path.exists(self.cmd_file):
+        self._ipc_ready = False
+        if self.socket_path is not None and os.path.exists(self.socket_path):
             try:
-                os.remove(self.cmd_file)
+                os.remove(self.socket_path)
             except Exception:
                 pass
-        self.cmd_file = None
+        self.socket_path = None
