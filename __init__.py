@@ -98,11 +98,6 @@ class SwayimgImageDisplayer(ImageDisplayer):
         here; the real image follows a moment later via IPC preview().
         """
         working_dir = self.working_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        socket_dir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        self.socket_path = os.path.join(
-            socket_dir,
-            "ranger-swayimg-{}.sock".format(os.getpid())
-        )
 
         lua_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ranger_preview.lua")
         cmd = ["swayimg", "--appid", self.app_id, "--config", lua_script]
@@ -111,9 +106,6 @@ class SwayimgImageDisplayer(ImageDisplayer):
             cmd.extend(["--position", "{},{}".format(x, y)])
             cmd.extend(["--size", "{},{}".format(w, h)])
         cmd.append(path)
-
-        env = os.environ.copy()
-        env["RANGER_SWAYIMG_SOCKET"] = self.socket_path
 
         # Ensure swayimg never steals focus (blocking — must complete before launch).
         if self._backend is not None:
@@ -124,9 +116,13 @@ class SwayimgImageDisplayer(ImageDisplayer):
             self.process = subprocess.Popen(
                 cmd,
                 cwd=self.working_dir,
-                env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+            )
+            # Matches sai.lib.ipc's default: <runtime>/<app_id>-<swayimg_pid>.socket
+            self.socket_path = os.path.join(
+                os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
+                "{}-{}.socket".format(self.app_id, self.process.pid)
             )
         except OSError:
             self.process = None
