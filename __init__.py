@@ -44,11 +44,16 @@ class SwayimgImageDisplayer(ImageDisplayer):
         self.last_geometry = None
         self.last_path = None
         self._hidden = True
+        self._actually_hidden = True
         self._hide_timer = None
         self._last_workspace = None
         self._last_image_time = 0.0
         self._ipc_ready = False
         self._backend = detect_backend()
+        self._pending = None
+        self._send_cond = threading.Condition()
+        self._send_thread = None
+        self._worker_stop = False
 
     def _running(self):
         return self.process is not None and self.process.poll() is None
@@ -87,10 +92,15 @@ class SwayimgImageDisplayer(ImageDisplayer):
         return (preview_x, preview_y, preview_w, preview_h), focus_id, workspace
 
     def _start(self, path, geometry):
-        """Launch swayimg and the companion Lua plugin."""
+        """Launch swayimg and the companion Lua plugin.
+
+        Note: on the very first preview ranger passes its cache thumbnail
+        here; the real image follows a moment later via IPC preview().
+        """
         working_dir = self.working_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        socket_dir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
         self.socket_path = os.path.join(
-            working_dir,
+            socket_dir,
             "ranger-swayimg-{}.sock".format(os.getpid())
         )
 
@@ -124,33 +134,71 @@ class SwayimgImageDisplayer(ImageDisplayer):
         self._last_workspace = None
         self._last_image_time = 0.0
         self._ipc_ready = False
+        self._actually_hidden = False
+        with self._send_cond:
+            self._pending = None
+            self._worker_stop = False
+        if self._send_thread is None or not self._send_thread.is_alive():
+            self._send_thread = threading.Thread(target=self._send_worker, daemon=True)
+            self._send_thread.start()
 
-    def _send(self, code):
-        """Send Lua code to swayimg via the IPC socket."""
-        if not self._running() or self.socket_path is None:
+    # IPC design: the main thread never blocks on the socket. _send() stashes
+    # only the LATEST request (latest-only coalescing — intermediate images
+    # from fast scrolling are irrelevant). A daemon worker sends it; failed
+    # sends are dropped — the next draw queues a newer code anyway.
+    def _send_worker(self):
+        """Daemon thread: send the latest pending code; discard on failure."""
+        while True:
+            with self._send_cond:
+                while self._pending is None and not self._worker_stop:
+                    self._send_cond.wait()
+                if self._worker_stop:
+                    return
+                code = self._pending
+                self._pending = None
+            self._do_send(code)
+
+    def _do_send(self, code):
+        """Connect and send one request; drop silently on any failure."""
+        proc = self.process
+        path = self.socket_path
+        if proc is None or proc.poll() is not None or path is None:
             return
         if not self._ipc_ready:
             deadline = time.monotonic() + 5.0
-            while not os.path.exists(self.socket_path):
-                if time.monotonic() > deadline:
+            while not os.path.exists(path):
+                if time.monotonic() > deadline or self._worker_stop:
                     return
                 time.sleep(0.05)
             self._ipc_ready = True
+        code_bytes = code.encode()
+        payload = struct.pack("<I", len(code_bytes)) + code_bytes
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
-        sock.connect(self.socket_path)
-        with sock, sock.makefile("rb") as f:
-            code_bytes = code.encode()
-            sock.sendall(struct.pack("<I", len(code_bytes)) + code_bytes)
-            # Read and discard the response. This ensures the server has
-            # finished executing the code before we close the socket;
-            # closing too early can RST the connection and truncate the
-            # request.
-            header = f.read(5)
-            if len(header) == 5:
-                resp_len = struct.unpack("<I", header[1:5])[0]
-                if resp_len > 0:
-                    f.read(resp_len)
+        sock.settimeout(0.5)
+        try:
+            sock.connect(path)
+        except OSError:
+            sock.close()
+            return
+        sock.sendall(payload)
+        # shutdown(SHUT_WR) queues a FIN after our data, so the server sees
+        # data-then-EOF. WITHOUT the drain below, close() with the server's
+        # unread response in our buffer triggers RST instead of FIN, and a
+        # busy server would discard the not-yet-read request (this caused
+        # silently dropped preview/exit commands). The drain must stay.
+        sock.shutdown(socket.SHUT_WR)
+        try:
+            while sock.recv(4096):
+                pass
+        except OSError:
+            pass
+        sock.close()
+
+    def _send(self, code):
+        """Stash Lua code for async sending. Only the latest code is kept."""
+        with self._send_cond:
+            self._pending = code
+            self._send_cond.notify()
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
@@ -171,10 +219,11 @@ class SwayimgImageDisplayer(ImageDisplayer):
 
         # Handle window visibility and position via the backend.
         if self._backend is not None and geometry is not None:
-            if self._hidden:
+            if self._actually_hidden:
                 self._backend.show_window(
                     self.app_id, geometry[0], geometry[1], workspace)
                 self._backend.restore_focus(focus_id)
+                self._actually_hidden = False
                 self._hidden = False
                 self._last_workspace = workspace
             elif geometry != self.last_geometry:
@@ -220,17 +269,22 @@ class SwayimgImageDisplayer(ImageDisplayer):
         if self._hidden and self._running():
             if self._backend is not None:
                 self._backend.hide_window(self.app_id)
+            self._actually_hidden = True
 
     def quit(self):
         if self._hide_timer is not None:
             self._hide_timer.cancel()
             self._hide_timer = None
+        # Signal the worker to stop; it observes the flag promptly on its own
+        # (idle: immediately, busy: at the next loop check). No join needed —
+        # the daemon thread never uses process/socket after this point.
+        with self._send_cond:
+            self._pending = None
+            self._worker_stop = True
+            self._send_cond.notify()
+        self._send_thread = None
         if self._running() and self.process is not None:
-            self._send("sai.exit()")
-            try:
-                self.process.wait(timeout=2)
-            except Exception:
-                self.process.terminate()
+            self.process.terminate()
             self.process = None
         self._ipc_ready = False
         if self.socket_path is not None and os.path.exists(self.socket_path):

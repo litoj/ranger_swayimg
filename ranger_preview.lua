@@ -24,7 +24,9 @@ function _G.preview(path, w, h)
 	if path == '' then return end
 	sai.mode = 'viewer'
 	sai.viewer.go(path)
-	if w and h then sai.set_window_size(tonumber(w), tonumber(h)) end
+	if w and h then
+		sai.set_window_size(w, h)
+	end
 end
 
 sai.eventloop.subscribe {
