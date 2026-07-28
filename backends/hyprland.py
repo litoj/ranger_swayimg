@@ -72,10 +72,10 @@ class HyprlandBackend(CompositorBackend):
     # ------------------------------------------------------------------
 
     def prepare_for_draw(self):
-        """Return (terminal_geometry, None, workspace_id) — focus not supported."""
+        """Return (terminal_geometry, None, workspace_id, fullscreen) — focus not supported."""
         clients = self._get_clients()
         if clients is None:
-            return None, None, None
+            return None, None, None, False
 
         if self._parent_pid is None:
             client_pids = set(c.get("pid") for c in clients if c.get("pid"))
@@ -85,17 +85,17 @@ class HyprlandBackend(CompositorBackend):
                     break
 
         if self._parent_pid is None:
-            return None, None, None
+            return None, None, None, False
 
         for c in clients:
             if c.get("pid") == self._parent_pid:
                 at = c.get("at", [0, 0])
                 size = c.get("size", [0, 0])
                 ws = c.get("workspace", {}).get("id")
-                return (at[0], at[1], size[0], size[1]), None, ws
+                return (at[0], at[1], size[0], size[1]), None, ws, bool(c.get("fullscreen"))
 
         self._parent_pid = None
-        return None, None, None
+        return None, None, None, False
 
     def apply_no_focus(self, app_id):
         """Attempt to add a no_focus window rule at runtime.

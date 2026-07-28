@@ -61,23 +61,24 @@ class SwayimgImageDisplayer(ImageDisplayer):
     def _compute_geometry(self, start_x, start_y, width, height):
         """Compute preview pixel geometry and capture the focused window.
 
-        Returns (geometry_tuple, focus_id, workspace) where geometry is
-        (x, y, w, h), focus_id is an opaque backend-specific identifier
-        for the currently focused window (or None), and workspace is an
-        opaque backend-specific identifier for the workspace containing
-        the terminal (or None).
+        Returns (geometry_tuple, focus_id, workspace, fullscreen) where
+        geometry is (x, y, w, h), focus_id is an opaque backend-specific
+        identifier for the currently focused window (or None), workspace is
+        an opaque backend-specific identifier for the workspace containing
+        the terminal (or None), and fullscreen is True when the terminal
+        window is fullscreen.
         """
         if self._backend is None:
-            return None, None, None
+            return None, None, None, False
 
         try:
             font_width, font_height = get_font_dimensions()
         except Exception:
-            return None, None, None
+            return None, None, None, False
 
-        term_geo, focus_id, workspace = self._backend.prepare_for_draw()
+        term_geo, focus_id, workspace, fullscreen = self._backend.prepare_for_draw()
         if term_geo is None:
-            return None, None, None
+            return None, None, None, False
 
         term_x, term_y = term_geo[0], term_geo[1]
 
@@ -89,7 +90,7 @@ class SwayimgImageDisplayer(ImageDisplayer):
         preview_x = max(0, preview_x)
         preview_y = max(0, preview_y)
 
-        return (preview_x, preview_y, preview_w, preview_h), focus_id, workspace
+        return (preview_x, preview_y, preview_w, preview_h), focus_id, workspace, fullscreen
 
     def _start(self, path, geometry):
         """Launch swayimg and the companion Lua plugin.
@@ -198,7 +199,13 @@ class SwayimgImageDisplayer(ImageDisplayer):
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
-        geometry, focus_id, workspace = self._compute_geometry(start_x, start_y, width, height)
+        geometry, focus_id, workspace, fullscreen = self._compute_geometry(start_x, start_y, width, height)
+
+        # While the terminal is fullscreen, leave swayimg completely alone:
+        # no launch, no IPC, no window moves.  Everything resumes on the
+        # first draw after fullscreen is exited.
+        if fullscreen:
+            return
 
         # Cancel any pending hide — we're about to show an image.
         if self._hide_timer is not None:

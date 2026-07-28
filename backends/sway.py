@@ -100,10 +100,10 @@ class SwayBackend(CompositorBackend):
     # ------------------------------------------------------------------
 
     def prepare_for_draw(self):
-        """Single tree query — return (terminal_geometry, focused_window_id, workspace)."""
+        """Single tree query — return (terminal_geometry, focused_window_id, workspace, fullscreen)."""
         tree = self._query_tree()
         if tree is None:
-            return None, None, None
+            return None, None, None, False
 
         if self._parent_pid is None:
             sway_pids = self._collect_pids(tree)
@@ -114,16 +114,18 @@ class SwayBackend(CompositorBackend):
 
         term_geo = None
         workspace = None
+        fullscreen = False
         if self._parent_pid is not None:
             node = self._find_node_by_pid(tree, self._parent_pid)
             if node:
                 term_geo = self._get_node_geometry(node)
                 workspace = self._find_workspace_for_pid(tree, self._parent_pid)
+                fullscreen = bool(node.get("fullscreen_mode"))
             else:
                 self._parent_pid = None
 
         focused_id = self._find_focused_id(tree)
-        return term_geo, focused_id, workspace
+        return term_geo, focused_id, workspace, fullscreen
 
     def apply_no_focus(self, app_id):
         """Prevent windows with *app_id* from stealing focus on launch."""
