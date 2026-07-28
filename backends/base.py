@@ -2,6 +2,11 @@
 
 from __future__ import absolute_import, division, print_function
 
+import json
+import os
+import subprocess
+import time
+
 
 class CompositorBackend(object):
     """Interface for compositor-specific operations.
@@ -51,9 +56,48 @@ class CompositorBackend(object):
         """Move the window to *workspace* silently (without switching focus)."""
         raise NotImplementedError
 
+    def window_exists(self, pid):
+        """Return True if a window belonging to *pid* is currently mapped."""
+        raise NotImplementedError
+
+    def wait_mapped(self, pid, timeout=2.0, alive=None):
+        """Block until the window for *pid* appears; return True if it did.
+
+        *alive* is an optional callable: when it returns False the owner
+        process has died, so we bail out early instead of waiting out the
+        full timeout for a window that will never map.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.window_exists(pid):
+                return True
+            if alive is not None and not alive():
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.04)
+
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _run_silent(cmd):
+        """Run *cmd* silently, ignoring failures; return True on exit code 0."""
+        try:
+            result = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _json_output(cmd):
+        """Run *cmd* and parse stdout as JSON; return None on any failure."""
+        try:
+            return json.loads(subprocess.check_output(cmd))
+        except Exception:
+            return None
 
     @staticmethod
     def _walk_ppid_chain(start_pid):
@@ -71,3 +115,18 @@ class CompositorBackend(object):
                         break
             except Exception:
                 break
+
+    def _resolve_parent_pid(self, client_pids_fn):
+        """Return the PID of the terminal running ranger (cached).
+
+        Walks the ppid chain until a PID owning a compositor window is found.
+        *client_pids_fn* is called only on cache miss, so collecting pids
+        from the compositor costs nothing on subsequent calls.
+        """
+        if self._parent_pid is None:
+            pids = client_pids_fn()
+            for pid in self._walk_ppid_chain(os.getpid()):
+                if pid in pids:
+                    self._parent_pid = pid
+                    break
+        return self._parent_pid

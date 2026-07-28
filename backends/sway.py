@@ -2,9 +2,7 @@
 
 from __future__ import absolute_import, division, print_function
 
-import json
 import os
-import subprocess
 
 from .base import CompositorBackend
 
@@ -23,13 +21,9 @@ class SwayBackend(CompositorBackend):
     # Tree helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _query_tree():
+    def _query_tree(self):
         """Fetch the Sway tree as a parsed dict, or None on failure."""
-        try:
-            return json.loads(subprocess.check_output(["swaymsg", "-t", "get_tree"]))
-        except Exception:
-            return None
+        return self._json_output(["swaymsg", "-t", "get_tree"])
 
     @staticmethod
     def _collect_pids(node, pids=None):
@@ -95,6 +89,10 @@ class SwayBackend(CompositorBackend):
         h = wr.get("height", rect.get("height", 0))
         return (x, y, w, h)
 
+    def _swaymsg(self, *args):
+        """Run swaymsg with *args*, silently ignoring failures."""
+        self._run_silent(["swaymsg"] + list(args))
+
     # ------------------------------------------------------------------
     # Backend interface
     # ------------------------------------------------------------------
@@ -105,17 +103,10 @@ class SwayBackend(CompositorBackend):
         if tree is None:
             return None, None, None, False
 
-        if self._parent_pid is None:
-            sway_pids = self._collect_pids(tree)
-            for pid in self._walk_ppid_chain(os.getpid()):
-                if pid in sway_pids:
-                    self._parent_pid = pid
-                    break
-
         term_geo = None
         workspace = None
         fullscreen = False
-        if self._parent_pid is not None:
+        if self._resolve_parent_pid(lambda: self._collect_pids(tree)) is not None:
             node = self._find_node_by_pid(tree, self._parent_pid)
             if node:
                 term_geo = self._get_node_geometry(node)
@@ -127,83 +118,37 @@ class SwayBackend(CompositorBackend):
         focused_id = self._find_focused_id(tree)
         return term_geo, focused_id, workspace, fullscreen
 
+    def window_exists(self, pid):
+        """Return True if a container with *pid* exists in the tree."""
+        tree = self._query_tree()
+        return tree is not None and self._find_node_by_pid(tree, pid) is not None
+
     def apply_no_focus(self, app_id):
         """Prevent windows with *app_id* from stealing focus on launch."""
-        try:
-            subprocess.run(
-                ["swaymsg", "no_focus", "[app_id={}]".format(app_id)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except Exception:
-            pass
+        self._swaymsg("no_focus", "[app_id={}]".format(app_id))
 
     def restore_focus(self, window_id):
         """Restore focus to *window_id*."""
-        if window_id is None:
-            return
-        try:
-            subprocess.run(
-                ["swaymsg", "[con_id={}]".format(window_id), "focus"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except Exception:
-            pass
+        if window_id is not None:
+            self._swaymsg("[con_id={}]".format(window_id), "focus")
 
     def show_window(self, app_id, x, y, workspace=None):
         """Restore from scratchpad and position."""
         ws_cmd = "move to workspace {}".format(workspace) if workspace else "move to workspace current"
-        try:
-            subprocess.run(
-                ["swaymsg", "[app_id={}]".format(app_id),
-                 "{}, move absolute position {} {}".format(ws_cmd, x, y)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except Exception:
-            pass
+        self._swaymsg("[app_id={}]".format(app_id),
+                      "{}, move absolute position {} {}".format(ws_cmd, x, y))
 
     def hide_window(self, app_id):
         """Hide the window to the scratchpad."""
-        try:
-            subprocess.run(
-                ["swaymsg", "[app_id={}]".format(app_id),
-                 "move to scratchpad"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except Exception:
-            pass
+        self._swaymsg("[app_id={}]".format(app_id), "move to scratchpad")
 
     def move_window(self, app_id, x, y):
         """Move a visible window to absolute position (*x*, *y*)."""
-        try:
-            subprocess.run(
-                ["swaymsg", "[app_id={}]".format(app_id),
-                 "move absolute position {} {}".format(x, y)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except Exception:
-            pass
+        self._swaymsg("[app_id={}]".format(app_id),
+                      "move absolute position {} {}".format(x, y))
 
     def move_to_workspace(self, app_id, workspace):
         """Move the window to *workspace* silently (without switching focus)."""
-        if workspace is None:
-            return
-        try:
-            subprocess.run(
-                ["swaymsg", "[app_id={}]".format(app_id),
-                 "move to workspace {}".format(workspace)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except Exception:
-            pass
+        if workspace is not None:
+            self._swaymsg("[app_id={}]".format(app_id),
+                          "move to workspace {}".format(workspace))

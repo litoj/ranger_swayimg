@@ -3,9 +3,9 @@
 Display image previews in [ranger](https://github.com/ranger/ranger) using
 [swayimg](https://github.com/litoj/swayimg), a Wayland-native image viewer.
 
-A single swayimg instance is kept alive and controlled via `sai.lib.ipc` over a Unix domain socket,
-avoiding restart flicker. All compositor-specific window management (positioning, hiding, focus
-prevention) is handled by a pluggable backend layer — no shell `os.execute` calls from the Lua side.
+- One swayimg instance per ranger process, driven over a Unix socket — switching images is a single async IPC call, no respawn, no flicker.
+- The window is (un)hidden and positioned via sway/hyprland IPC, always on ranger's workspace.
+- While ranger is fullscreen, the preview does nothing at all.
 
 ## Requirements
 
