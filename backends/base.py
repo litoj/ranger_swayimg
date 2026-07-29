@@ -6,6 +6,27 @@ import json
 import os
 import subprocess
 import time
+from typing import Any, NamedTuple, Optional, Tuple
+
+
+class DrawContext(NamedTuple):
+    """Compositor facts needed for one ranger draw or hide decision.
+
+    Attributes:
+        term_geometry: (x, y, w, h) of the terminal window, or None.
+        focus_id: opaque identifier of the focused window, or None.
+        workspace: opaque identifier of the terminal's workspace, or None.
+        fullscreen: the terminal window is fullscreen.
+        ws_current: False when the terminal's workspace is not the one in
+            front of the user, None when unknown — view-stealing operations
+            (show/restore-focus/hide/spawn) must be gated on this.
+    """
+
+    term_geometry: Optional[Tuple[int, int, int, int]]
+    focus_id: Any
+    workspace: Any
+    fullscreen: bool
+    ws_current: Optional[bool]
 
 
 class CompositorBackend(object):
@@ -20,20 +41,8 @@ class CompositorBackend(object):
         """Return True if running under this compositor."""
         raise NotImplementedError
 
-    def prepare_for_draw(self):
-        """Return (terminal_geometry, focused_window_id, workspace, fullscreen,
-            workspace_current).
-
-        terminal_geometry: (x, y, w, h) of the terminal running ranger, or None.
-        focused_window_id: opaque identifier for the currently focused window,
-            or None when focus restoration is not supported.
-        workspace: opaque backend-specific identifier for the workspace
-            containing the terminal, or None when not supported.
-        fullscreen: True when the terminal window is fullscreen.
-        workspace_current: False when the terminal's workspace is not the one
-            currently focused, None when unknown — view-stealing operations
-            (show/restore-focus/spawn) must be gated on this.
-        """
+    def prepare_for_draw(self) -> DrawContext:
+        """Snapshot of compositor state for the terminal running ranger."""
         raise NotImplementedError
 
     def apply_no_focus(self, app_id):

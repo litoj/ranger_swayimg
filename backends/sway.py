@@ -4,7 +4,7 @@ from __future__ import absolute_import, division, print_function
 
 import os
 
-from .base import CompositorBackend
+from .base import CompositorBackend, DrawContext
 
 
 class SwayBackend(CompositorBackend):
@@ -120,12 +120,11 @@ class SwayBackend(CompositorBackend):
     # Backend interface
     # ------------------------------------------------------------------
 
-    def prepare_for_draw(self):
-        """Single tree query — return (terminal_geometry, focused_window_id, workspace,
-        fullscreen, workspace_current)."""
+    def prepare_for_draw(self) -> DrawContext:
+        """Single tree query — one DrawContext snapshot."""
         tree = self._query_tree()
         if tree is None:
-            return None, None, None, False, None
+            return DrawContext(None, None, None, False, None)
 
         term_geo = None
         workspace = None
@@ -146,7 +145,7 @@ class SwayBackend(CompositorBackend):
                       else workspace == focused_ws)
 
         focused_id = self._find_focused_id(tree)
-        return term_geo, focused_id, workspace, fullscreen, ws_current
+        return DrawContext(term_geo, focused_id, workspace, fullscreen, ws_current)
 
     def window_exists(self, pid):
         """Return True if a container with *pid* exists in the tree."""

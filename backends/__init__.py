@@ -2,11 +2,12 @@
 
 from __future__ import absolute_import, division, print_function
 
-from .base import CompositorBackend
+from .base import CompositorBackend, DrawContext
 from .sway import SwayBackend
 from .hyprland import HyprlandBackend
 
-__all__ = ["detect_backend", "CompositorBackend", "SwayBackend", "HyprlandBackend"]
+__all__ = ["detect_backend", "CompositorBackend", "DrawContext",
+           "SwayBackend", "HyprlandBackend"]
 
 
 def detect_backend():

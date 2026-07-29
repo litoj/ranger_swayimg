@@ -27,12 +27,12 @@ import struct
 import subprocess
 import threading
 import time
-from typing import Optional, TypeGuard
+from typing import Optional, Tuple, TypeGuard
 
 from ranger.core.shared import FileManagerAware
 from ranger.ext.img_display import ImageDisplayer, get_font_dimensions, register_image_displayer
 
-from .backends import detect_backend
+from .backends import detect_backend, DrawContext
 
 
 class _ViewerProcess(object):
@@ -259,13 +259,12 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
-        geometry, focus_id, workspace, fullscreen, ws_current = \
-            self._compute_geometry(start_x, start_y, width, height)
+        geometry, ctx = self._compute_geometry(start_x, start_y, width, height)
 
         # While the terminal is fullscreen, leave swayimg completely alone:
         # no launch, no IPC, no window moves.  Everything resumes on the
         # first draw after fullscreen is exited.
-        if fullscreen:
+        if ctx.fullscreen:
             return
 
         self._hide_gen += 1
@@ -276,13 +275,13 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         # view are forbidden: scratchpad-show and focus would rip the user
         # out of fullscreen or another workspace.  Skip the draw entirely
         # and stay HIDDEN so the next draw retries once they're back.
-        away = ws_current is False
+        away = ctx.ws_current is False
 
         if not self._viewer.running():
             if away:
                 self._visibility.hide()
                 return
-            self._start(path, geometry, workspace)
+            self._start(path, geometry, ctx.workspace)
             self._last.path = path
             return
 
@@ -295,9 +294,9 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
                     self._visibility.hide()
                     return
                 self._backend.show_window(
-                    self.app_id, geometry[0], geometry[1], workspace)
-                self._backend.restore_focus(focus_id)
-                self._last.workspace = workspace
+                    self.app_id, geometry[0], geometry[1], ctx.workspace)
+                self._backend.restore_focus(ctx.focus_id)
+                self._last.workspace = ctx.workspace
             elif geometry != self._last.geometry:
                 self._backend.move_window(self.app_id, geometry[0], geometry[1])
 
@@ -313,40 +312,39 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         # After image update, correct workspace if ranger moved.
         # Throttled: skip if the last image update was less than 1s ago,
         # so that holding down a movement key doesn't trigger repeated IPC.
-        if (self._backend is not None and workspace is not None
-                and workspace != self._last.workspace
+        if (self._backend is not None and ctx.workspace is not None
+                and ctx.workspace != self._last.workspace
                 and time.monotonic() - self._last.image_time > 1.0):
-            self._backend.move_to_workspace(self.app_id, workspace)
-            self._last.workspace = workspace
+            self._backend.move_to_workspace(self.app_id, ctx.workspace)
+            self._last.workspace = ctx.workspace
 
         self._last.geometry = geometry
         self._last.path = path
 
-    def _compute_geometry(self, start_x, start_y, width, height):
+    def _compute_geometry(
+        self, start_x: int, start_y: int, width: int, height: int
+    ) -> Tuple[Optional[Tuple[int, int, int, int]], DrawContext]:
         """Compute preview pixel geometry and capture compositor state.
 
-        Returns (geometry_tuple, focus_id, workspace, fullscreen, ws_current)
-        where geometry is (x, y, w, h), focus_id is an opaque backend-specific
-        identifier for the currently focused window (or None), workspace is
-        an opaque backend-specific identifier for the workspace containing
-        the terminal (or None), fullscreen is True when the terminal window
-        is fullscreen, and ws_current gates view-stealing window operations
-        (False = the user is on another workspace; None = unknown).
+        Returns (preview_geometry, context) where preview_geometry is the
+        pixel (x, y, w, h) for the preview window, or None when it cannot be
+        computed, and context is the DrawContext snapshot whose ``fullscreen``
+        and ``ws_current`` fields gate everything draw() may do to windows.
         """
+        fallback = DrawContext(None, None, None, False, None)
         if self._backend is None:
-            return None, None, None, False, None
+            return None, fallback
 
         try:
             font_width, font_height = get_font_dimensions()
         except Exception:
-            return None, None, None, False, None
+            return None, fallback
 
-        term_geo, focus_id, workspace, fullscreen, ws_current = \
-            self._backend.prepare_for_draw()
-        if term_geo is None:
-            return None, None, None, False, None
+        ctx = self._backend.prepare_for_draw()
+        if ctx.term_geometry is None:
+            return None, ctx
 
-        term_x, term_y = term_geo[0], term_geo[1]
+        term_x, term_y = ctx.term_geometry[0], ctx.term_geometry[1]
 
         preview_x = term_x + start_x * font_width
         preview_y = term_y + start_y * font_height
@@ -356,8 +354,7 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         preview_x = max(0, preview_x)
         preview_y = max(0, preview_y)
 
-        return ((preview_x, preview_y, preview_w, preview_h),
-                focus_id, workspace, fullscreen, ws_current)
+        return (preview_x, preview_y, preview_w, preview_h), ctx
 
     def _start(self, path, geometry, workspace):
         """Launch swayimg and the companion Lua plugin, then place the window.
@@ -451,7 +448,7 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         """
         if self._backend is None or not self._viewer.running():
             return True
-        if self._backend.prepare_for_draw()[4] is False:
+        if self._backend.prepare_for_draw().ws_current is False:
             return False
         self._backend.hide_window(self.app_id)
         return True
