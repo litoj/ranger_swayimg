@@ -1,15 +1,16 @@
 # ranger_swayimg
 
 Display image previews in [ranger](https://github.com/ranger/ranger) using
-[swayimg](https://github.com/litoj/swayimg), a Wayland-native image viewer.
+swayimg, a Wayland-native image viewer.
 
 - One swayimg instance per ranger process, driven over a Unix socket — switching images is a single async IPC call, no respawn, no flicker.
 - The window is (un)hidden and positioned via sway/hyprland IPC, always on ranger's workspace.
+- The window hides only once the preview script reports "not an image" (or a folder is selected) — slow raw/psd thumbnails never flicker through a premature hide.
 - While ranger is fullscreen, the preview does nothing at all.
 
 ## Requirements
 
-- **swayimg** with the [sai.swi](https://github.com/litoj/sai.swi) Lua plugin
+- [swayimg](https://github.com/artemsen/swayimg) with the [sai.swi](https://github.com/litoj/sai.swi) Lua plugin
 - **Sway** or **Hyprland** compositor
 
 ## Installation

@@ -5,9 +5,11 @@
 # companion swayimg Lua plugin (using sai.swi) lives next to this file in
 # ranger_preview.lua.
 #
-# The preview window stays visible even when ranger loses focus.  It only hides
-# when the cursor moves to a non-image file.  All window management is handled
-# by the Python backend layer (see the ``backends`` package).
+# The preview window stays visible even when ranger loses focus.  It hides
+# only once ranger's preview script confirms the selected file is not an
+# image (slow thumbnails, e.g. raw/psd, therefore never flicker), or when a
+# folder is selected.  All window management is handled by the Python
+# backend layer (see the ``backends`` package).
 #
 # Requirements:
 #   - swayimg with sai.swi plugin (https://github.com/litoj/sai.swi)
@@ -27,6 +29,7 @@ import threading
 import time
 from typing import Optional, TypeGuard
 
+from ranger.core.shared import FileManagerAware
 from ranger.ext.img_display import ImageDisplayer, get_font_dimensions, register_image_displayer
 
 from .backends import detect_backend
@@ -165,9 +168,10 @@ class _IpcSender(object):
 
 
 # Visibility is a 3-state machine: SHOWN -> HIDE_PENDING -> HIDDEN.  The
-# pending state exists purely so that a draw() following a clear() within
-# the delay can cancel the hide, avoiding close-reopen flicker when
-# switching between images.
+# pending state means ranger called clear() while its preview script is
+# still running for the selected file; the hide then waits for the script's
+# verdict (see _watch_decision), so slow previews of e.g. raw/psd files keep
+# the previous image on screen instead of flickering through a hide.
 class _VisibilityState(object):
     """Preview window visibility state machine."""
 
@@ -175,36 +179,29 @@ class _VisibilityState(object):
     HIDE_PENDING = "hide_pending"
     HIDDEN = "hidden"
 
-    HIDE_DELAY = 0.1
-
     def __init__(self):
         self.state = self.HIDDEN
-        self._timer = None
 
     def begin_draw(self):
-        """Commit SHOWN, cancel a pending hide, and return the prior state."""
+        """Commit SHOWN and return the prior state."""
         prior = self.state
         self.state = self.SHOWN
-        self.cancel()
         return prior
 
-    def schedule_hide(self, callback):
-        """Start the delayed hide; *callback* runs unless a draw cancels it."""
-        if self.state != self.SHOWN:
-            return
-        self.state = self.HIDE_PENDING
+    def defer_hide(self):
+        """Move to HIDE_PENDING (waiting for the preview-script verdict)."""
+        if self.state == self.SHOWN:
+            self.state = self.HIDE_PENDING
 
-        def expire():
-            if self.state == self.HIDE_PENDING:
-                self.state = self.HIDDEN
-                callback()
-        self._timer = threading.Timer(self.HIDE_DELAY, expire)
-        self._timer.start()
+    def hide(self):
+        self.state = self.HIDDEN
 
-    def cancel(self):
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
+    def commit_pending_hide(self):
+        """Commit a deferred hide; True only when it had been pending."""
+        if self.state == self.HIDE_PENDING:
+            self.state = self.HIDDEN
+            return True
+        return False
 
 
 class _DrawState(object):
@@ -218,7 +215,7 @@ class _DrawState(object):
 
 
 @register_image_displayer("swayimg")
-class SwayimgImageDisplayer(ImageDisplayer):
+class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
     """Image preview using a persistent swayimg instance."""
 
     APP_ID_PREFIX = "ranger-swayimg"
@@ -229,6 +226,7 @@ class SwayimgImageDisplayer(ImageDisplayer):
         self._viewer = _ViewerProcess(self.app_id)
         self._ipc = _IpcSender(self._viewer)
         self._visibility = _VisibilityState()
+        self._hide_gen = 0
         self._last = _DrawState()
 
     # pylint: disable=too-many-positional-arguments
@@ -241,6 +239,7 @@ class SwayimgImageDisplayer(ImageDisplayer):
         if fullscreen:
             return
 
+        self._hide_gen += 1
         prev_state = self._visibility.begin_draw()
 
         if not self._viewer.running():
@@ -350,11 +349,56 @@ class SwayimgImageDisplayer(ImageDisplayer):
         self._ipc.start()
 
     def clear(self, start_x, start_y, width, height):
-        self._visibility.schedule_hide(
-            lambda: self._backend.hide_window(self.app_id)
-            if self._backend is not None and self._viewer.running() else None)
+        # ranger calls clear() the moment the cursor moves, before using the
+        # new file's preview: while the preview script is still loading (raw/
+        # psd thumbnails take time) the verdict is pending, and is_image()
+        # means draw() follows in the same UI cycle.  In both cases the
+        # window must stay shown, else every image switch flickers through a
+        # hide.  Hide immediately only on a definitive non-image result.
+        self._hide_gen += 1
+        thisfile = self.fm.thisfile
+        path = (thisfile.realpath
+                if thisfile is not None and thisfile.is_file else None)
+        data = self.fm.previews.get(path, {}) if path else {}
+        undecided = bool(data.get('loading'))
+        image = 'imagepreview' in data or 'directimagepreview' in data
+        if not undecided and not image:
+            if self._visibility.state != _VisibilityState.HIDDEN:
+                self._visibility.hide()
+                if self._backend is not None and self._viewer.running():
+                    self._backend.hide_window(self.app_id)
+            return
+        self._visibility.defer_hide()
+        if undecided:
+            threading.Thread(
+                target=self._watch_decision,
+                args=(path, self._hide_gen),
+                daemon=True).start()
+
+    def _watch_decision(self, path, gen):
+        """Hide the window once the preview script denies an image preview.
+
+        Runs on a short-lived daemon thread; *gen* vetoes the hide when a
+        newer clear/draw superseded this one before the verdict arrived.
+        """
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if gen != self._hide_gen:
+                return
+            data = self.fm.previews.get(path)
+            if data is None or not data.get('loading'):
+                if data is not None and (
+                        'imagepreview' in data or 'directimagepreview' in data):
+                    return
+                break
+            time.sleep(0.05)
+        if gen != self._hide_gen or not self._visibility.commit_pending_hide():
+            return
+        if self._backend is not None and self._viewer.running():
+            self._backend.hide_window(self.app_id)
 
     def quit(self):
-        self._visibility.cancel()
+        self._hide_gen += 1
+        self._visibility.hide()
         self._ipc.stop()
         self._viewer.terminate()
