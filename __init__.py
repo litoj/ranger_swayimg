@@ -52,7 +52,6 @@ class _ViewerProcess(object):
         return self._alive(self.proc)
 
     def start(self, cmd, cwd):
-        """Launch the subprocess; return True on success."""
         # pylint: disable=consider-using-with
         try:
             self.proc = subprocess.Popen(
@@ -287,7 +286,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
 
         win_size = (geometry[2], geometry[3]) if geometry else None
 
-        # Handle window visibility and position via the backend.
         if self._backend is not None and geometry is not None:
             if prev_state == _VisibilityState.HIDDEN:
                 if away:
@@ -300,7 +298,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
             elif geometry != self._last.geometry:
                 self._backend.move_window(self.app_id, geometry[0], geometry[1])
 
-        # Reload the image in swayimg if something changed.
         if (prev_state != _VisibilityState.SHOWN
                 or path != self._last.path or geometry != self._last.geometry):
             args = "{!r}".format(path)

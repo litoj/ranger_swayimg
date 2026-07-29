@@ -11,10 +11,7 @@ __all__ = ["detect_backend", "CompositorBackend", "DrawContext",
 
 
 def detect_backend():
-    """Auto-detect the running compositor and return a backend instance.
-
-    Returns None if no supported compositor is detected.
-    """
+    """Return a backend for the running compositor, or None if unsupported."""
     for cls in (SwayBackend, HyprlandBackend):
         if cls.detect():
             return cls()

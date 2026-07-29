@@ -32,11 +32,9 @@ class HyprlandBackend(CompositorBackend):
     # ------------------------------------------------------------------
 
     def _get_clients(self):
-        """Return parsed ``hyprctl clients -j`` output, or None."""
         return self._json_output(["hyprctl", "clients", "-j"])
 
     def _dispatch(self, *args):
-        """Run ``hyprctl dispatch`` with *args*, silently ignoring failures."""
         self._run_silent(["hyprctl", "dispatch"] + list(args))
 
     # ------------------------------------------------------------------
@@ -67,7 +65,6 @@ class HyprlandBackend(CompositorBackend):
         return DrawContext(None, None, None, False, None)
 
     def window_exists(self, pid):
-        """Return True if a client with *pid* exists."""
         clients = self._get_clients()
         if clients is None:
             return False
@@ -88,12 +85,11 @@ class HyprlandBackend(CompositorBackend):
         self.move_window(app_id, x, y)
 
     def hide_window(self, app_id):
-        """Hide the window to a special workspace."""
         self._dispatch("movetoworkspacesilent",
                        "special:{},class:^{}$".format(self.SPECIAL_WORKSPACE, app_id))
 
     def move_window(self, app_id, x, y):
-        """Move window to absolute position using delta-based movewindowpixel."""
+        # hyprctl has no absolute move; movewindowpixel takes deltas.
         clients = self._get_clients()
         if clients is None:
             return
@@ -109,6 +105,5 @@ class HyprlandBackend(CompositorBackend):
                 return
 
     def move_to_workspace(self, app_id, workspace):
-        """Move the window to *workspace* silently (without switching focus)."""
         if workspace is not None:
             self._dispatch("movetoworkspacesilent", "{},class:^{}$".format(workspace, app_id))
