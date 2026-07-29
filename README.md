@@ -5,7 +5,8 @@ swayimg, a Wayland-native image viewer.
 
 - One swayimg instance per ranger process, driven over a Unix socket — switching images is a single async IPC call, no respawn, no flicker.
 - The window is (un)hidden and positioned via sway/hyprland IPC, always on ranger's workspace.
-- The window hides only once the preview script reports "not an image" (or a folder is selected) — slow raw/psd thumbnails never flicker through a premature hide.
+- The window hides only once the preview script reports "not an image" (or a folder is selected) — slow raw thumbnails never flicker through a premature hide.
+- While you're on another workspace, background redraws stay invisible: no scratchpad-show or focus command is ever fired, so it can't pop you out of a fullscreen app. The preview appears on the next draw after you return.
 - While ranger is fullscreen, the preview does nothing at all.
 
 ## Requirements

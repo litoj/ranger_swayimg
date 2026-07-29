@@ -167,11 +167,14 @@ class _IpcSender(object):
             sock.close()
 
 
-# Visibility is a 3-state machine: SHOWN -> HIDE_PENDING -> HIDDEN.  The
-# pending state means ranger called clear() while its preview script is
-# still running for the selected file; the hide then waits for the script's
-# verdict (see _watch_decision), so slow previews of e.g. raw/psd files keep
-# the previous image on screen instead of flickering through a hide.
+# Visibility is a 3-state machine: SHOWN -> HIDE_PENDING -> HIDDEN.  Every
+# hide — for a folder, a decided non-image, or a script verdict — passes
+# through HIDE_PENDING and fires only after a short grace timer; a draw()
+# in the same breath cancels it.  That absorbs the clear()+draw() volley
+# ranger emits when the previewed file is deleted (its previews entry is
+# already gone, so verdict-based deferral cannot apply), and it funnels
+# every compositor hide through one spot, where it can be vetoed while the
+# user is on another workspace.
 class _VisibilityState(object):
     """Preview window visibility state machine."""
 
@@ -179,29 +182,54 @@ class _VisibilityState(object):
     HIDE_PENDING = "hide_pending"
     HIDDEN = "hidden"
 
+    HIDE_GRACE = 0.3
+
     def __init__(self):
         self.state = self.HIDDEN
+        self._timer = None
 
     def begin_draw(self):
-        """Commit SHOWN and return the prior state."""
+        """Commit SHOWN, cancel a pending hide, and return the prior state."""
         prior = self.state
         self.state = self.SHOWN
+        self._cancel_timer()
         return prior
 
     def defer_hide(self):
         """Move to HIDE_PENDING (waiting for the preview-script verdict)."""
+        self._cancel_timer()
         if self.state == self.SHOWN:
             self.state = self.HIDE_PENDING
 
+    def schedule_hide(self, op):
+        """Arm the hide grace timer; *op* fires afterwards unless cancelled.
+
+        *op* must return True when the window is now hidden; returning False
+        (e.g. the user is on another workspace) leaves HIDE_PENDING in
+        place so a later event can retry.
+        """
+        self._cancel_timer()
+        if self.state == self.HIDDEN:
+            return
+        self.state = self.HIDE_PENDING
+
+        def expire():
+            if self.state != self.HIDE_PENDING:
+                return
+            if op():
+                self.state = self.HIDDEN
+        self._timer = threading.Timer(self.HIDE_GRACE, expire)
+        self._timer.daemon = True
+        self._timer.start()
+
     def hide(self):
+        self._cancel_timer()
         self.state = self.HIDDEN
 
-    def commit_pending_hide(self):
-        """Commit a deferred hide; True only when it had been pending."""
-        if self.state == self.HIDE_PENDING:
-            self.state = self.HIDDEN
-            return True
-        return False
+    def _cancel_timer(self):
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
 
 
 class _DrawState(object):
@@ -231,7 +259,8 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
-        geometry, focus_id, workspace, fullscreen = self._compute_geometry(start_x, start_y, width, height)
+        geometry, focus_id, workspace, fullscreen, ws_current = \
+            self._compute_geometry(start_x, start_y, width, height)
 
         # While the terminal is fullscreen, leave swayimg completely alone:
         # no launch, no IPC, no window moves.  Everything resumes on the
@@ -242,7 +271,17 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._hide_gen += 1
         prev_state = self._visibility.begin_draw()
 
+        # While the user is on another workspace (e.g. ranger's folder was
+        # updated in the background), compositor operations that steal the
+        # view are forbidden: scratchpad-show and focus would rip the user
+        # out of fullscreen or another workspace.  Skip the draw entirely
+        # and stay HIDDEN so the next draw retries once they're back.
+        away = ws_current is False
+
         if not self._viewer.running():
+            if away:
+                self._visibility.hide()
+                return
             self._start(path, geometry, workspace)
             self._last.path = path
             return
@@ -252,6 +291,9 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         # Handle window visibility and position via the backend.
         if self._backend is not None and geometry is not None:
             if prev_state == _VisibilityState.HIDDEN:
+                if away:
+                    self._visibility.hide()
+                    return
                 self._backend.show_window(
                     self.app_id, geometry[0], geometry[1], workspace)
                 self._backend.restore_focus(focus_id)
@@ -281,26 +323,28 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._last.path = path
 
     def _compute_geometry(self, start_x, start_y, width, height):
-        """Compute preview pixel geometry and capture the focused window.
+        """Compute preview pixel geometry and capture compositor state.
 
-        Returns (geometry_tuple, focus_id, workspace, fullscreen) where
-        geometry is (x, y, w, h), focus_id is an opaque backend-specific
+        Returns (geometry_tuple, focus_id, workspace, fullscreen, ws_current)
+        where geometry is (x, y, w, h), focus_id is an opaque backend-specific
         identifier for the currently focused window (or None), workspace is
         an opaque backend-specific identifier for the workspace containing
-        the terminal (or None), and fullscreen is True when the terminal
-        window is fullscreen.
+        the terminal (or None), fullscreen is True when the terminal window
+        is fullscreen, and ws_current gates view-stealing window operations
+        (False = the user is on another workspace; None = unknown).
         """
         if self._backend is None:
-            return None, None, None, False
+            return None, None, None, False, None
 
         try:
             font_width, font_height = get_font_dimensions()
         except Exception:
-            return None, None, None, False
+            return None, None, None, False, None
 
-        term_geo, focus_id, workspace, fullscreen = self._backend.prepare_for_draw()
+        term_geo, focus_id, workspace, fullscreen, ws_current = \
+            self._backend.prepare_for_draw()
         if term_geo is None:
-            return None, None, None, False
+            return None, None, None, False, None
 
         term_x, term_y = term_geo[0], term_geo[1]
 
@@ -312,7 +356,8 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         preview_x = max(0, preview_x)
         preview_y = max(0, preview_y)
 
-        return (preview_x, preview_y, preview_w, preview_h), focus_id, workspace, fullscreen
+        return ((preview_x, preview_y, preview_w, preview_h),
+                focus_id, workspace, fullscreen, ws_current)
 
     def _start(self, path, geometry, workspace):
         """Launch swayimg and the companion Lua plugin, then place the window.
@@ -354,7 +399,9 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         # psd thumbnails take time) the verdict is pending, and is_image()
         # means draw() follows in the same UI cycle.  In both cases the
         # window must stay shown, else every image switch flickers through a
-        # hide.  Hide immediately only on a definitive non-image result.
+        # hide.  The decided hide also waits out a grace period: after the
+        # previewed file itself is deleted, ranger clears for it (its
+        # previews entry is already gone) right before drawing the next one.
         self._hide_gen += 1
         thisfile = self.fm.thisfile
         path = (thisfile.realpath
@@ -363,10 +410,7 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         undecided = bool(data.get('loading'))
         image = 'imagepreview' in data or 'directimagepreview' in data
         if not undecided and not image:
-            if self._visibility.state != _VisibilityState.HIDDEN:
-                self._visibility.hide()
-                if self._backend is not None and self._viewer.running():
-                    self._backend.hide_window(self.app_id)
+            self._visibility.schedule_hide(self._do_hide)
             return
         self._visibility.defer_hide()
         if undecided:
@@ -392,10 +436,25 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
                     return
                 break
             time.sleep(0.05)
-        if gen != self._hide_gen or not self._visibility.commit_pending_hide():
+        if gen != self._hide_gen:
             return
-        if self._backend is not None and self._viewer.running():
-            self._backend.hide_window(self.app_id)
+        self._visibility.schedule_hide(self._do_hide)
+
+    def _do_hide(self):
+        """Fire the compositor hide; False when it must wait (see below).
+
+        Called at the end of the hide grace period; only then is the state
+        marked HIDDEN.  Refuses to fire while the user is on another
+        workspace: sway's scratchpad move would rip them out of their
+        fullscreen view — the drop keeps state and window consistent, and
+        the next displayer event after they return normalizes everything.
+        """
+        if self._backend is None or not self._viewer.running():
+            return True
+        if self._backend.prepare_for_draw()[4] is False:
+            return False
+        self._backend.hide_window(self.app_id)
+        return True
 
     def quit(self):
         self._hide_gen += 1

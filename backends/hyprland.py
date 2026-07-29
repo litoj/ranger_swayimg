@@ -44,24 +44,28 @@ class HyprlandBackend(CompositorBackend):
     # ------------------------------------------------------------------
 
     def prepare_for_draw(self):
-        """Return (terminal_geometry, None, workspace_id, fullscreen) — focus not supported."""
+        """Return (terminal_geometry, None, workspace_id, fullscreen, workspace_current).
+
+        workspace_current is None (unknown): Hyprland's operations are all
+        silent, so no view-stealing gate is needed there.
+        """
         clients = self._get_clients()
         if clients is None:
-            return None, None, None, False
+            return None, None, None, False, None
 
         parent = self._resolve_parent_pid(lambda: {c.get("pid") for c in clients if c.get("pid")})
         if parent is None:
-            return None, None, None, False
+            return None, None, None, False, None
 
         for c in clients:
             if c.get("pid") == parent:
                 at = c.get("at", [0, 0])
                 size = c.get("size", [0, 0])
                 ws = c.get("workspace", {}).get("id")
-                return (at[0], at[1], size[0], size[1]), None, ws, bool(c.get("fullscreen"))
+                return (at[0], at[1], size[0], size[1]), None, ws, bool(c.get("fullscreen")), None
 
         self._parent_pid = None
-        return None, None, None, False
+        return None, None, None, False, None
 
     def window_exists(self, pid):
         """Return True if a client with *pid* exists."""

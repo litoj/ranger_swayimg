@@ -9,7 +9,7 @@ sai.overlay = true
 sai.decoration = false
 sai.antialiasing = false
 sai.viewer.default_scale = 'fit'
-sai.imagelist.adjacent = true -- load the files that are likely to get previewed
+sai.imagelist.adjacent = false -- preloading neighbours starves the actual preview decode
 sai.imagelist.recursive = false
 sai.imagelist.fsmon = false
 sai.imagelist.order = 'none'
@@ -17,8 +17,11 @@ sai.imagelist.order = 'none'
 function _G.preview(path, w, h)
 	if path == '' then return end
 	sai.mode = 'viewer'
-	sai.viewer.go(path)
-	if w and h then sai.set_window_size(w, h) end
+	if sai.viewer.get_image().path ~= path then sai.viewer.go(path) end
+	if w then
+		local res = sai.get_window_size()
+		if w ~= res.width or h ~= res.height then sai.set_window_size(w, h) end
+	end
 end
 
 sai.eventloop.subscribe {

@@ -73,6 +73,29 @@ class SwayBackend(CompositorBackend):
         return None
 
     @staticmethod
+    def _find_focused_workspace(node):
+        """Find the name of the workspace holding the focused container."""
+        focused = None
+        for n in SwayBackend._walk_nodes(node):
+            if n.get("focused") and n.get("type") in ("con", "floating_con"):
+                focused = n.get("id")
+                break
+        if focused is None:
+            return None
+        for ws in SwayBackend._walk_nodes(node):
+            if ws.get("type") == "workspace" and any(
+                    n.get("id") == focused for n in SwayBackend._walk_nodes(ws)):
+                return ws.get("name")
+        return None
+
+    @staticmethod
+    def _walk_nodes(node):
+        yield node
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            for n in SwayBackend._walk_nodes(child):
+                yield n
+
+    @staticmethod
     def _get_node_geometry(node):
         """Extract absolute content position from a Sway tree node.
 
@@ -98,10 +121,11 @@ class SwayBackend(CompositorBackend):
     # ------------------------------------------------------------------
 
     def prepare_for_draw(self):
-        """Single tree query — return (terminal_geometry, focused_window_id, workspace, fullscreen)."""
+        """Single tree query — return (terminal_geometry, focused_window_id, workspace,
+        fullscreen, workspace_current)."""
         tree = self._query_tree()
         if tree is None:
-            return None, None, None, False
+            return None, None, None, False, None
 
         term_geo = None
         workspace = None
@@ -115,8 +139,14 @@ class SwayBackend(CompositorBackend):
             else:
                 self._parent_pid = None
 
+        # View-stealing operations (show/restore focus) are only safe while
+        # the terminal's workspace is the one in front of the user.
+        focused_ws = self._find_focused_workspace(tree)
+        ws_current = (None if workspace is None or focused_ws is None
+                      else workspace == focused_ws)
+
         focused_id = self._find_focused_id(tree)
-        return term_geo, focused_id, workspace, fullscreen
+        return term_geo, focused_id, workspace, fullscreen, ws_current
 
     def window_exists(self, pid):
         """Return True if a container with *pid* exists in the tree."""

@@ -21,7 +21,8 @@ class CompositorBackend(object):
         raise NotImplementedError
 
     def prepare_for_draw(self):
-        """Return (terminal_geometry, focused_window_id, workspace, fullscreen).
+        """Return (terminal_geometry, focused_window_id, workspace, fullscreen,
+            workspace_current).
 
         terminal_geometry: (x, y, w, h) of the terminal running ranger, or None.
         focused_window_id: opaque identifier for the currently focused window,
@@ -29,6 +30,9 @@ class CompositorBackend(object):
         workspace: opaque backend-specific identifier for the workspace
             containing the terminal, or None when not supported.
         fullscreen: True when the terminal window is fullscreen.
+        workspace_current: False when the terminal's workspace is not the one
+            currently focused, None when unknown — view-stealing operations
+            (show/restore-focus/spawn) must be gated on this.
         """
         raise NotImplementedError
 
