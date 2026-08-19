@@ -255,6 +255,18 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._visibility = _VisibilityState()
         self._hide_gen = 0
         self._last = _DrawState()
+        # Ranger only clears its previews dict when preview_images is toggled
+        # off — it never calls clear()/quit() on the displayer, and the browser
+        # column doesn't redraw (need_redraw stays False for the same file).
+        # Without this hook the swayimg window would stay visible forever.
+        self._preview_sig = self.fm.settings.signal_bind(
+            'setopt.preview_images', self._on_preview_images_changed,
+            priority=0.3)
+
+    def _on_preview_images_changed(self, signal):
+        if not signal.value:
+            self._hide_gen += 1
+            self._visibility.schedule_hide(self._do_hide)
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
@@ -451,6 +463,13 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         return True
 
     def quit(self):
+        sig = self._preview_sig
+        if sig is not None:
+            self._preview_sig = None
+            try:
+                self.fm.settings.signal_unbind(sig)
+            except ValueError:
+                pass
         self._hide_gen += 1
         self._visibility.hide()
         self._ipc.stop()
