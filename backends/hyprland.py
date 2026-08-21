@@ -42,9 +42,6 @@ class HyprlandBackend(CompositorBackend):
     # ------------------------------------------------------------------
 
     def prepare_for_draw(self) -> DrawContext:
-        """ws_current is None (unknown): Hyprland's operations are all
-        silent, so no view-stealing gate is needed there.
-        """
         clients = self._get_clients()
         if clients is None:
             return DrawContext(None, None, None, False, None)
@@ -58,8 +55,12 @@ class HyprlandBackend(CompositorBackend):
                 at = c.get("at", [0, 0])
                 size = c.get("size", [0, 0])
                 ws = c.get("workspace", {}).get("id")
+                active = self._json_output(["hyprctl", "activeworkspace", "-j"])
+                active_id = active.get("id") if active else None
+                ws_current = (None if ws is None or active_id is None
+                              else ws == active_id)
                 return DrawContext((at[0], at[1], size[0], size[1]),
-                                   None, ws, bool(c.get("fullscreen")), None)
+                                   None, ws, bool(c.get("fullscreen")), ws_current)
 
         self._parent_pid = None
         return DrawContext(None, None, None, False, None)

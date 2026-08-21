@@ -152,16 +152,37 @@ class SwayBackend(CompositorBackend):
             self._swaymsg("[con_id={}]".format(window_id), "focus")
 
     def show_window(self, app_id, x, y, workspace=None):
-        """Restore from scratchpad and position."""
-        ws_cmd = "move to workspace {}".format(workspace) if workspace else "move to workspace current"
-        self._swaymsg("[app_id={}]".format(app_id),
-                      "{}, move absolute position {} {}".format(ws_cmd, x, y))
+        """Restore from scratchpad and position.
+
+        MUST be one atomic command with the position move FIRST and the
+        workspace move LAST.  Sway realizes a window onto the workspace
+        currently in front of the user the moment it applies an absolute
+        position to it (for a scratchpad window this beats a queued or
+        preceding workspace move; for a window on another workspace it
+        yanks the window over), so any order but this drops the preview in
+        front of whatever the user is doing.  With the workspace move last
+        the final state is always the named workspace — verified silently
+        and correctly even while another workspace is showing.  Without a
+        known workspace the window stays hidden: showing it wherever the
+        user happens to be is exactly what must not happen.
+        """
+        if workspace is not None:
+            self._swaymsg("[app_id={}]".format(app_id),
+                          "move absolute position {} {}, move to workspace {}".format(x, y, workspace))
 
     def hide_window(self, app_id):
         """Hide the window to the scratchpad."""
         self._swaymsg("[app_id={}]".format(app_id), "move to scratchpad")
 
     def move_window(self, app_id, x, y):
+        """Move a visible window to (*x*, *y*).
+
+        Only call while the window's workspace is the one in front of the
+        user: sway applies an absolute position by pulling a floating
+        window onto the CURRENT workspace, so firing this while ranger's
+        workspace is invisible yanks the preview onto whatever the user is
+        looking at.
+        """
         self._swaymsg("[app_id={}]".format(app_id),
                       "move absolute position {} {}".format(x, y))
 

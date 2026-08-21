@@ -17,9 +17,13 @@ class DrawContext(NamedTuple):
         focus_id: opaque identifier of the focused window, or None.
         workspace: opaque identifier of the terminal's workspace, or None.
         fullscreen: the terminal window is fullscreen.
-        ws_current: False when the terminal's workspace is not the one in
-            front of the user, None when unknown — view-stealing operations
-            (show/restore-focus/hide/spawn) must be gated on this.
+        ws_current: True when the terminal's workspace is the one in front
+            of the user, False when it is not, None when unknown (e.g.
+            focus sits on an empty workspace).  View-affecting operations
+            (show/restore-focus/hide/spawn/workspace-move) must be gated on
+            this being True — they misbehave exactly in the unknown state
+            (scratchpad moves steal/follow focus and a compound move can
+            land the window on the user's current workspace).
     """
 
     term_geometry: Optional[Tuple[int, int, int, int]]

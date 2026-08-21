@@ -181,7 +181,7 @@ class _VisibilityState(object):
     HIDE_PENDING = "hide_pending"
     HIDDEN = "hidden"
 
-    HIDE_GRACE = 0.3
+    HIDE_GRACE = 0.5
 
     def __init__(self):
         self.state = self.HIDDEN
@@ -255,6 +255,7 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._visibility = _VisibilityState()
         self._hide_gen = 0
         self._last = _DrawState()
+        self._move_pending = False
         # Ranger only clears its previews dict when preview_images is toggled
         # off — it never calls clear()/quit() on the displayer, and the browser
         # column doesn't redraw (need_redraw stays False for the same file).
@@ -282,11 +283,14 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         prev_state = self._visibility.begin_draw()
 
         # While the user is on another workspace (e.g. ranger's folder was
-        # updated in the background), compositor operations that steal the
-        # view are forbidden: scratchpad-show and focus would rip the user
-        # out of fullscreen or another workspace.  Skip the draw entirely
-        # and stay HIDDEN so the next draw retries once they're back.
-        away = ctx.ws_current is False
+        # updated in the background) — or it is UNKNOWN which workspace is
+        # in front of them (None, e.g. focus sits on an empty workspace) —
+        # compositor operations that affect the view are forbidden: a
+        # scratchpad hide rips the user's view to ranger's workspace, and a
+        # show can drop the preview onto whatever workspace the user is
+        # looking at, obstructing their app.  Skip the draw entirely and
+        # stay HIDDEN so the next draw retries once the state is safe.
+        away = ctx.ws_current is not True
 
         if not self._viewer.running():
             if away:
@@ -303,11 +307,25 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
                 if away:
                     self._visibility.hide()
                     return
+                self._move_pending = False
                 self._backend.show_window(
                     self.app_id, geometry[0], geometry[1], ctx.workspace)
                 self._backend.restore_focus(ctx.focus_id)
                 self._last.workspace = ctx.workspace
-            elif geometry != self._last.geometry:
+            elif away:
+                # While ranger's workspace is not on screen the window must
+                # not be repositioned: sway pulls floating windows onto the
+                # user's current workspace to apply 'move absolute
+                # position', so the resize-adapt would drop the preview
+                # into the app the user is looking at.  Reposition on the
+                # first draw after the user returns instead (the swayimg-
+                # side size update via the IPC preview below stays — it
+                # resizes the window in place, which sway allows from any
+                # workspace).
+                if geometry != self._last.geometry:
+                    self._move_pending = True
+            elif geometry != self._last.geometry or self._move_pending:
+                self._move_pending = False
                 self._backend.move_window(self.app_id, geometry[0], geometry[1])
 
         if (prev_state != _VisibilityState.SHOWN
@@ -322,6 +340,7 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         # Throttled: skip if the last image update was less than 1s ago,
         # so that holding down a movement key doesn't trigger repeated IPC.
         if (self._backend is not None and ctx.workspace is not None
+                and ctx.ws_current is True
                 and ctx.workspace != self._last.workspace
                 and time.monotonic() - self._last.image_time > 1.0):
             self._backend.move_to_workspace(self.app_id, ctx.workspace)
@@ -397,6 +416,7 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._last.geometry = geometry
         self._last.workspace = workspace
         self._last.image_time = 0.0
+        self._move_pending = False
         self._ipc.start()
 
     def clear(self, start_x, start_y, width, height):
@@ -450,14 +470,15 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         """Fire the compositor hide; False when it must wait (see below).
 
         Called at the end of the hide grace period; only then is the state
-        marked HIDDEN.  Refuses to fire while the user is on another
-        workspace: sway's scratchpad move would rip them out of their
-        fullscreen view — the drop keeps state and window consistent, and
-        the next displayer event after they return normalizes everything.
+        marked HIDDEN.  Refuses to fire unless the terminal's workspace is
+        known to be the one in front of the user: in the away/unknown
+        states sway's scratchpad move would rip their view to ranger's
+        workspace.  The drop keeps state and window consistent, and the
+        next displayer event after they return normalizes everything.
         """
         if self._backend is None or not self._viewer.running():
             return True
-        if self._backend.prepare_for_draw().ws_current is False:
+        if self._backend.prepare_for_draw().ws_current is not True:
             return False
         self._backend.hide_window(self.app_id)
         return True
