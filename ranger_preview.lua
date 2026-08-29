@@ -14,15 +14,37 @@ sai.imagelist.recursive = false
 sai.imagelist.fsmon = false
 sai.imagelist.order = 'none'
 
-function _G.preview(path, w, h)
-	if path == '' then return end
-	sai.mode = 'viewer'
-	if sai.viewer.get_image().path ~= path then sai.viewer.go(path) end
-	if w then
-		local res = sai.get_window_size()
-		if w ~= res.width or h ~= res.height then sai.set_window_size(w, h) end
+local dbg_path = os.getenv 'SWAYIMG_DEBUG_LOG'
+local function dbg(...)
+	if not dbg_path then return end
+	local parts = {}
+	for i = 1, select('#', ...) do parts[#parts + 1] = tostring(select(i, ...)) end
+	local now = os.clock()
+	local f = io.open(dbg_path, 'a')
+	if f then
+		f:write(string.format('%.3f [lua] %s\n', now, table.concat(parts, ' ')))
+		f:close()
 	end
 end
+
+function _G.preview(path, w, h)
+	if path == '' then return end
+	dbg('preview():', path, w, h)
+	sai.mode = 'viewer'
+	if sai.viewer.get_image().path ~= path then
+		local ok, err = pcall(sai.viewer.go, path)
+		dbg('viewer.go ok=', ok, 'err=', err)
+	end
+	if w then
+		local res = sai.get_window_size()
+		if w ~= res.width or h ~= res.height then
+			dbg('set_window_size:', w, 'x', h)
+			sai.set_window_size(w, h)
+		end
+	end
+end
+
+dbg('lua init done')
 
 sai.eventloop.subscribe {
 	event = 'SwiEnter',
