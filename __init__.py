@@ -34,23 +34,6 @@ from ranger.ext.img_display import ImageDisplayer, get_font_dimensions, register
 
 from .backends import detect_backend, DrawContext
 
-# Temporary investigation aid: always log to a dedicated file, no env var
-# needed.  The viewer's Lua side reads the same path back out of the
-# environment it inherits when ranger spawns it; each ranger start
-# truncates so the file holds exactly one session.
-_DBG_LOG = "/tmp/ranger_swayimg.log"
-os.environ["SWAYIMG_DEBUG_LOG"] = _DBG_LOG
-open(_DBG_LOG, "w").close()
-
-
-def _dbg(*args):
-    if _DBG_LOG:
-        with open(_DBG_LOG, "a") as f:
-            f.write("{:.3f} [{}] {}\n".format(
-                time.monotonic(), threading.current_thread().name,
-                " ".join(str(a) for a in args)))
-
-
 _LIBC = None
 
 
@@ -89,13 +72,11 @@ class _ViewerProcess(object):
 
     def start(self, cmd, cwd):
         # pylint: disable=consider-using-with
-        stderr = subprocess.DEVNULL
-        if _DBG_LOG:
-            stderr = open(_DBG_LOG + ".swayimg", "ab")
         try:
             _load_libc()
             self.proc = subprocess.Popen(
-                cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=stderr,
+                cmd, cwd=cwd, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 preexec_fn=_pdeathsig_preexec)
         except OSError:
             self.proc = None
@@ -234,14 +215,11 @@ class _VisibilityState(object):
         """Commit SHOWN, cancel a pending hide, and return the prior state."""
         prior = self.state
         self.state = self.SHOWN
-        _dbg("begin_draw: prior=", prior)
         self._cancel_timer()
         return prior
 
     def defer_hide(self):
         """Move to HIDE_PENDING (waiting for the preview-script verdict)."""
-        if self._timer is not None:
-            _dbg("timersk: cancel (defer_hide)")
         self._cancel_timer()
         if self.state == self.SHOWN:
             self.state = self.HIDE_PENDING
@@ -255,24 +233,19 @@ class _VisibilityState(object):
         """
         self._cancel_timer()
         if self.state == self.HIDDEN:
-            _dbg("schedule_hide: state already HIDDEN, skip")
             return
         self.state = self.HIDE_PENDING
-        _dbg("timersk: arm")
 
         def expire():
             if self.state != self.HIDE_PENDING:
-                _dbg("expire: skipped, state=", self.state)
                 return
             if op():
-                _dbg("expire: HIDDEN now")
                 self.state = self.HIDDEN
         self._timer = threading.Timer(self.HIDE_GRACE, expire)
         self._timer.daemon = True
         self._timer.start()
 
     def hide(self):
-        _dbg("hide() called")
         self._cancel_timer()
         self.state = self.HIDDEN
 
@@ -322,7 +295,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
-        _dbg("draw():", path)
         geometry, ctx = self._compute_geometry(start_x, start_y, width, height)
 
         # While the terminal is fullscreen, leave swayimg completely alone:
@@ -449,8 +421,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         """
         lua_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ranger_preview.lua")
         cmd = ["swayimg", "--appid", self.app_id, "--config", lua_script]
-        if _DBG_LOG:
-            cmd.append("--verbose")
         if geometry is not None:
             x, y, w, h = geometry
             cmd.extend(["--position", "{},{}".format(x, y)])
@@ -479,7 +449,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._ipc.start()
 
     def clear(self, start_x, start_y, width, height):
-        _dbg("clear(): thisfile=", getattr(self.fm.thisfile, "path", None))
         # ranger calls clear() the moment the cursor moves, before using the
         # new file's preview: while the preview script is still loading (raw/
         # psd thumbnails take time) the verdict is pending, and is_image()
@@ -495,7 +464,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         data = self.fm.previews.get(path, {}) if path else {}
         undecided = bool(data.get('loading'))
         image = 'imagepreview' in data or 'directimagepreview' in data
-        _dbg("clear(): undecided=", undecided, "image=", image, "data=", data)
         # A MISSING previews entry never justifies hiding: it only happens
         # when the previewed file itself was just deleted and ranger purged
         # its entry before requesting the new file's preview.  A decided
@@ -528,14 +496,12 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         if path is not None:
             data = self.fm.previews.get(path)
             if not data or data.get('loading'):
-                _dbg("_check_hide: verdict pending -> keep+watch")
                 threading.Thread(
                     target=self._watch_decision,
                     args=(path, self._hide_gen),
                     daemon=True).start()
                 return False
             if 'imagepreview' in data or 'directimagepreview' in data:
-                _dbg("_check_hide: image verdict -> keep")
                 return False
         return self._do_hide()
 
@@ -550,7 +516,6 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         appear_deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if gen != self._hide_gen:
-                _dbg("_watch_decision: vetoed by newer gen, exit")
                 return
             data = self.fm.previews.get(path)
             if not data:
@@ -558,13 +523,11 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
                     break  # file gone, or no preview will ever be requested
             elif not data.get('loading'):
                 if 'imagepreview' in data or 'directimagepreview' in data:
-                    _dbg("_watch_decision: image verdict -> keep, exit")
                     return
                 break
             time.sleep(0.05)
         if gen != self._hide_gen:
             return
-        _dbg("_watch_decision: non-image outcome -> schedule hide")
         self._visibility.schedule_hide(self._check_hide)
 
     def _do_hide(self):
