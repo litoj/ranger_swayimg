@@ -459,24 +459,31 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         # previews entry is already gone) right before drawing the next one.
         self._hide_gen += 1
         thisfile = self.fm.thisfile
-        path = (thisfile.realpath
-                if thisfile is not None and thisfile.is_file else None)
-        data = self.fm.previews.get(path, {}) if path else {}
-        undecided = bool(data.get('loading'))
-        image = 'imagepreview' in data or 'directimagepreview' in data
-        # A MISSING previews entry never justifies hiding: it only happens
-        # when the previewed file itself was just deleted and ranger purged
-        # its entry before requesting the new file's preview.  A decided
-        # non-image (folder, or entry present without imagepreview) hides.
-        if data and not undecided and not image:
+        if thisfile is not None and thisfile.is_file:
+            path = thisfile.realpath
+            data = self.fm.previews.get(path, {})
+            undecided = bool(data.get('loading'))
+            image = 'imagepreview' in data or 'directimagepreview' in data
+            # A MISSING previews entry never justifies hiding: it only happens
+            # when the previewed file itself was just deleted and ranger purged
+            # its entry before requesting the new file's preview.  A decided
+            # non-image (entry present without imagepreview) hides.
+            if data and not undecided and not image:
+                self._visibility.schedule_hide(self._check_hide)
+                return
+            self._visibility.defer_hide()
+            if undecided:
+                threading.Thread(
+                    target=self._watch_decision,
+                    args=(path, self._hide_gen),
+                    daemon=True).start()
+        else:
+            # A directory never has a previews entry and can never preview an
+            # image, so it must hide outright — deferring would leave the
+            # window stranded in HIDE_PENDING forever.  _check_hide re-reads
+            # the CURRENT file once the grace timer fires, so a quick onward
+            # move to an image is still honored.
             self._visibility.schedule_hide(self._check_hide)
-            return
-        self._visibility.defer_hide()
-        if undecided:
-            threading.Thread(
-                target=self._watch_decision,
-                args=(path, self._hide_gen),
-                daemon=True).start()
 
     def _check_hide(self):
         """Fire the grace-period hide only when it is SAFE to hide.
