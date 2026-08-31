@@ -31,5 +31,5 @@ end
 sai.eventloop.subscribe {
 	event = 'SwiEnter',
 	once = true,
-	callback = function() require('sai.lib.ipc').server() end,
+	callback = function() require('sai.bridge.ipc').server() end,
 }
