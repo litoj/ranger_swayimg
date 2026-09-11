@@ -17,14 +17,10 @@ sai.imagelist.order = 'none'
 function _G.preview(path, w, h)
 	if path == '' then return end
 	sai.mode = 'viewer'
-	if sai.viewer.get_image().path ~= path then
-		pcall(sai.viewer.go, path)
-	end
+	if sai.viewer.get_image().path ~= path then pcall(sai.viewer.go, path) end
 	if w then
 		local res = sai.get_window_size()
-		if w ~= res.width or h ~= res.height then
-			sai.set_window_size(w, h)
-		end
+		if w ~= res.width or h ~= res.height then sai.set_window_size(w, h) end
 	end
 end
 

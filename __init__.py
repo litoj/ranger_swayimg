@@ -7,9 +7,11 @@
 #
 # The preview window stays visible even when ranger loses focus.  It hides
 # only once ranger's preview script confirms the selected file is not an
-# image (slow thumbnails, e.g. raw/psd, therefore never flicker), or when a
-# folder is selected.  All window management is handled by the Python
-# backend layer (see the ``backends`` package).
+# image (slow thumbnails, e.g. raw/psd, therefore never flicker), when a
+# folder is selected, or when the last entry in a folder is deleted (the
+# empty selection emits no preview signal, so the selection move is watched).
+# All window management is handled by the Python backend layer (see the
+# ``backends`` package).
 #
 # Requirements:
 #   - swayimg with sai.swi plugin (https://github.com/litoj/sai.swi)
@@ -205,7 +207,7 @@ class _VisibilityState(object):
     HIDE_PENDING = "hide_pending"
     HIDDEN = "hidden"
 
-    HIDE_GRACE = 0.5
+    HIDE_GRACE = 0.3
 
     def __init__(self):
         self.state = self.HIDDEN
@@ -287,11 +289,34 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
         self._preview_sig = self.fm.settings.signal_bind(
             'setopt.preview_images', self._on_preview_images_changed,
             priority=0.3)
+        # When the last visible entry in a directory is deleted, ranger
+        # collapses the preview column target to None and emits NO clear()/
+        # draw() for it (browsercolumn just passes on target None), so the
+        # swayimg window would otherwise outlive its image.  The selection
+        # move to an empty selection is the only event that still fires.
+        self._move_sig = self.fm.signal_bind('move', self._on_move, priority=0.3)
 
     def _on_preview_images_changed(self, signal):
         if not signal.value:
             self._hide_gen += 1
             self._visibility.schedule_hide(self._do_hide)
+
+    def _on_move(self, signal):
+        """Hide when the selection moves to a folder or to nothing at all.
+
+        Only the active tab's move matters; files are left to clear()/draw(),
+        whose preview verdict decides the hide.  A directory — or None when
+        the last visible entry is deleted — can never preview an image, so it
+        goes through the same grace+fire path; _check_hide re-reads the
+        CURRENT file, so a quick onward move to an image still cancels it.
+        """
+        if signal.tab is not self.fm.thistab:
+            return
+        new = signal.new
+        if new is not None and new.is_file:
+            return
+        self._hide_gen += 1
+        self._visibility.schedule_hide(self._check_hide)
 
     # pylint: disable=too-many-positional-arguments
     def draw(self, path, start_x, start_y, width, height):
@@ -577,6 +602,13 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
             self._preview_sig = None
             try:
                 self.fm.settings.signal_unbind(sig)
+            except ValueError:
+                pass
+        move_sig = self._move_sig
+        if move_sig is not None:
+            self._move_sig = None
+            try:
+                self.fm.signal_unbind(move_sig)
             except ValueError:
                 pass
         self._hide_gen += 1
