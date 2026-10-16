@@ -10,6 +10,8 @@
 # image (slow thumbnails, e.g. raw/psd, therefore never flicker), when a
 # folder is selected, or when the last entry in a folder is deleted (the
 # empty selection emits no preview signal, so the selection move is watched).
+# It also hides while a shell command owns the terminal (ui.suspend calls
+# quit()) and comes back with the first draw after the command finishes.
 # All window management is handled by the Python backend layer (see the
 # ``backends`` package).
 #
@@ -582,20 +584,26 @@ class SwayimgImageDisplayer(ImageDisplayer, FileManagerAware):
     def quit(self):
         # quit() is called from three places:
         #   1. ui.suspend() — every rifle command without the 'f' flag
-        #      (e.g. :trash, :shell, open in pager) because ranger hands the
-        #      terminal to the command and calls image_displayer.quit() first.
-        #      The UI comes right back though, and killing the viewer here is
-        #      what made the preview window close+reopen around such commands.
-        #      So in this case do NOTHING: the viewer keeps rendering the last
-        #      image on top of the preview area for the (typically brief) time
-        #      the command runs, and ranger's next draw() simply updates it.
-        #      swayimg's true lifetime is pinned to ranger's own process via
-        #      PR_SET_PDEATHSIG set at spawn, so it can never leak anyway.
-        #   2. fm.destroy at real exit — covered by the pdeathsig above.
+        #      (e.g. :trash, :shell, open in pager) and Ctrl-Z, because
+        #      ranger hands the terminal to the command and calls
+        #      image_displayer.quit() first.  Hide the window for that
+        #      time but do NOT kill the viewer: respawning it is what
+        #      made the preview close+reopen around such commands.  The
+        #      next draw() after the UI resumes re-shows it in place.
+        #      swayimg's true lifetime stays pinned to ranger's own
+        #      process via PR_SET_PDEATHSIG set at spawn, so it can never
+        #      leak anyway.
+        #   2. fm.destroy at real exit — takes the same hide; the viewer
+        #      dies via the pdeathsig above anyway.
         #   3. set_image_displayer when preview_images_method changes — only
         #      here is a real teardown warranted: new backend takes over.
         if self.fm.settings.preview_images_method == "swayimg":
             self._hide_gen += 1  # veto any pending hide watcher
+            # Immediate, not schedule_hide: while the UI is suspended no
+            # draw() can arrive to cancel a grace period, and the grace
+            # would leave the image over the command's output.
+            self._visibility.hide()
+            self._do_hide()
             return
         sig = self._preview_sig
         if sig is not None:
